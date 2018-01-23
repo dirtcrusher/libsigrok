@@ -1,3 +1,4 @@
+doxygen Doxyfile
 ./autogen.sh
 ./configure --disable-all-drivers --enable-pslela --enable-shared --enable-static
 make -j 4

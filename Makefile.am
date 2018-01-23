@@ -669,9 +669,6 @@ nodist_bindings_cxx_libsigrokcxx_la_include_HEADERS = \
 
 pkgconfig_DATA += bindings/cxx/libsigrokcxx.pc
 
-doxy/xml/index.xml: include/libsigrok/libsigrok.h
-	$(AM_V_GEN)cd $(srcdir) && BUILDDIR=$(abs_builddir)/ doxygen Doxyfile 2>/dev/null
-
 bindings/swig/enums.i: bindings/cxx/enums.timestamp
 bindings/cxx/enums.cpp: bindings/cxx/enums.timestamp
 bindings/cxx/include/libsigrokcxx/enums.hpp: bindings/cxx/enums.timestamp

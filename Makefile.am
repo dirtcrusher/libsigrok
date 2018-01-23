@@ -450,6 +450,12 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/pipistrello-ols/protocol.c \
 	src/hardware/pipistrello-ols/api.c
 endif
+if HW_PSLELA
+src_libdrivers_la_SOURCES += \
+	src/hardware/pslela/protocol.h \
+	src/hardware/pslela/protocol.c \
+	src/hardware/pslela/api.c
+endif
 if HW_RIGOL_DS
 src_libdrivers_la_SOURCES += \
 	src/hardware/rigol-ds/protocol.h \

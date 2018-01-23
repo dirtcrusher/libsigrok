@@ -305,7 +305,7 @@ shared_ptr<Packet> Context::create_logic_packet(
 
 shared_ptr<Packet> Context::create_analog_packet(
 	vector<shared_ptr<Channel> > channels,
-	const float *data_pointer, unsigned int num_samples, const Quantity *mq,
+	float *data_pointer, unsigned int num_samples, const Quantity *mq,
 	const Unit *unit, vector<const QuantityFlag *> mqflags)
 {
 	auto analog = g_new0(struct sr_datafeed_analog, 1);

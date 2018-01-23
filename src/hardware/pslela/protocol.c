@@ -20,3 +20,53 @@
 #include <config.h>
 #include "protocol.h"
 
+int hextobyte(const char hex[2], unsigned char *byte) {
+	unsigned char upper, lower;
+
+	if ('a' <= hex[0] && hex[0] <= 'f') {
+		upper = 10 + hex[0] - 'a';
+	} else if ('A' <= hex[0] && hex[0] <= 'F') {
+		upper = 10 + hex[0] - 'A';
+	} else if ('0' <= hex[0] && hex[0] <= '9') {
+		upper = hex[0] - '0';
+	} else {
+		/* err */
+		return 1;
+	}
+
+	if ('a' <= hex[1] && hex[1] <= 'f') {
+		lower = 10 + hex[1] - 'a';
+	} else if ('A' <= hex[1] && hex[1] <= 'F') {
+		lower = 10 + hex[1] - 'A';
+	} else if ('0' <= hex[1] && hex[1] <= '9') {
+		lower = hex[1] - '0';
+	} else {
+		/* err */
+		return 1;
+	}
+
+	*byte = (upper << 4) | (lower & 0xf);
+	return 0;
+}
+
+int bytetohex(const unsigned char byte, char hex[2]) {
+	unsigned char half;
+
+	half = byte & 0xf;
+	if (half <= 9) {
+		hex[1] = '0' + half;
+	} else {
+		hex[1] = 'a' + half - 10;
+	}
+
+	half = (byte >> 4) & 0xf;
+
+	if (half <= 9) {
+		hex[0] = '0' + half;
+	} else {
+		hex[0] = 'a' + half - 10;
+	}
+
+	return 0;
+}
+

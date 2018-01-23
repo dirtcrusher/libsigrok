@@ -27,8 +27,26 @@
 
 #define LOG_PREFIX "pslela"
 
+#define PSLELA_CMD_READ_VERSION  'v'
+#define PSLELA_CMD_START_CAPTURE 's'
+#define PSLELA_CMD_STOP_CAPTURE  't'
+#define PSLELA_CMD_READ_CAPTURE  'r'
+#define PSLELA_CMD_ERROR         'X'
+#define PSLELA_CMD_SUCCESS       'O'
+
+#define PSLELA_EXPECTED_VERSION  "101"
+
+struct pslela_cmd {
+	char code;
+	unsigned char len;
+	char buff[256];
+};
+
+// TODO
 struct dev_context {
 };
 
+int hextobyte(const char hex[2], unsigned char *byte);
+int bytetohex(const unsigned char byte, char hex[2]);
 
 #endif

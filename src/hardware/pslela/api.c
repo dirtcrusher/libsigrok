@@ -19,6 +19,7 @@
 
 #include <config.h>
 #include <string.h>
+#include <stdlib.h>
 #include "protocol.h"
 
 static const uint32_t scanopts[] = {
@@ -90,12 +91,17 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	sp_flush(current_port, SP_BUF_BOTH);
 
 	// We attempt to write a "get version" command to the port
-	char *version_command = "v00";
+	struct pslela_cmd request_version;
+	request_version.code = PSLELA_CMD_READ_VERSION;
+	request_version.len = 0;
+	char *version_command;
+	create_pslela_cmd_string(&version_command, &request_version);
 	if (sp_nonblocking_write(current_port, version_command, 3) < 0) {
 		sr_dbg("Couldn't write to port");
 		sp_free_port(current_port);
 		return NULL;
 	}
+	free(version_command);
 	unsigned int retries = 10;
 	while (retries > 0) {
 		if (sp_output_waiting(current_port) != 0) {
@@ -112,7 +118,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 
 	// We attempt to read the response
 	retries = 10;
-	char buffer[255] = {0};
+	char buffer[300] = {0};
 	unsigned char totalReceived = 0;
 	char received;
 	while ((retries > 0) && (totalReceived < 3)) {
@@ -131,16 +137,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sr_dbg("Couldn't read from port");
 		return NULL;
 	}
-	sr_dbg("Received %c%c", buffer[0], buffer[1]);
+	sr_dbg("Received %c%c%c", buffer[0], buffer[1], buffer[2]);
 
-	// We parse the response header received
-	if (buffer[0] != PSLELA_CMD_SUCCESS) {
-		sr_dbg("Received incorrect response from device");
-		sp_free_port(current_port);
-		return NULL;
-	}
-	unsigned char data_length;
-	if (hextobyte(buffer + 1, &data_length)) {
+	struct pslela_cmd version_response;
+	if ((parse_pslela_cmd_string(buffer, &version_response) < 0)
+		|| (version_response.code != PSLELA_CMD_SUCCESS)) {
 		sr_dbg("Received incorrect response from device");
 		sp_free_port(current_port);
 		return NULL;
@@ -149,11 +150,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	// We read the version string
 	totalReceived = 0;
 	retries = 10;
-	while ((retries > 0) && (totalReceived < data_length)) {
+	while ((retries > 0) && (totalReceived < version_response.len)) {
 		received = sp_nonblocking_read(
 			current_port,
-			buffer + totalReceived,
-			data_length - totalReceived
+			buffer + 3 + totalReceived,
+			version_response.len - totalReceived
 		);
 		if (received < 0) {
 			retries--;
@@ -166,9 +167,10 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		sp_free_port(current_port);
 		return NULL;
 	}
-	sr_dbg("Received version string \"%s\"", buffer);
+	parse_pslela_cmd_string(buffer, &version_response);
+	sr_dbg("Received version string \"%s\"", version_response.buff);
 
-	if (strcmp(buffer, PSLELA_EXPECTED_VERSION)) {
+	if (strcmp(version_response.buff, PSLELA_EXPECTED_VERSION)) {
 		sr_info("Found device with incompatible firmware version");
 		sp_free_port(current_port);
 		return NULL;

@@ -42,6 +42,9 @@ struct pslela_cmd {
 	char buff[256];
 };
 
+void create_pslela_cmd_string(char **str, struct pslela_cmd *cmd);
+int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd);
+
 // TODO
 struct dev_context {
 };

@@ -51,7 +51,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	struct drv_context *drvc = di->context;
 	drvc->instances = NULL;
 
-    // Get connexion info from options
+	// Get connexion info from options
 	const char *conn = NULL, *serial_comm = NULL;
 	GSList *l = options;
 	while (l != NULL) {
@@ -74,49 +74,53 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		serial_comm = "9600/8n1";
 	}
 
-    // Probe the serial port
+	// Probe the serial port
 	sr_dbg("Probing '%s' with options '%s'", conn, serial_comm);
+
 	struct sp_port *current_port;
 	sp_get_port_by_name(conn, &current_port);
 	if (sp_open(current_port, SP_MODE_READ_WRITE) != SP_OK) {
 		sr_dbg("Couldn't open port");
+		sp_free_port(current_port);
 		return NULL;
 	}
 
-    // The port has been opened
-    // We flush all buffers
-    sp_flush(current_port, SP_BUF_BOTH);
+	// The port has been opened
+	// We flush all buffers for good measure
+	sp_flush(current_port, SP_BUF_BOTH);
 
-    // We attempt to write a "get version" command to the port
+	// We attempt to write a "get version" command to the port
 	char *version_command = "v00";
 	if (sp_nonblocking_write(current_port, version_command, 3) < 0) {
 		sr_dbg("Couldn't write to port");
+		sp_free_port(current_port);
 		return NULL;
 	}
 	unsigned int retries = 10;
 	while (retries > 0) {
 		if (sp_output_waiting(current_port) != 0) {
 			retries--;
-            g_usleep(10);
+			g_usleep(10);
 			continue;
 		}
 	}
 	if (retries == 0) {
 		sr_dbg("Couldn't write to port");
+		sp_free_port(current_port);
 		return NULL;
 	}
 
-    // We attempt to read the response
+	// We attempt to read the response
 	retries = 10;
 	char buffer[255] = {0};
 	unsigned char totalReceived = 0;
 	char received;
 	while ((retries > 0) && (totalReceived < 3)) {
 		received = sp_nonblocking_read(
-				current_port,
-				buffer + totalReceived,
-				3 - totalReceived
-				);
+			current_port,
+			buffer + totalReceived,
+			3 - totalReceived
+		);
 		if (received < 0) {
 			retries--;
 			continue;
@@ -129,26 +133,28 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	}
 	sr_dbg("Received %c%c", buffer[0], buffer[1]);
 
-    // We parse the response header received
-    if (buffer[0] != PSLELA_CMD_SUCCESS) {
+	// We parse the response header received
+	if (buffer[0] != PSLELA_CMD_SUCCESS) {
 		sr_dbg("Received incorrect response from device");
+		sp_free_port(current_port);
 		return NULL;
 	}
 	unsigned char data_length;
 	if (hextobyte(buffer + 1, &data_length)) {
 		sr_dbg("Received incorrect response from device");
+		sp_free_port(current_port);
 		return NULL;
 	}
 
-    // We read the version string
+	// We read the version string
 	totalReceived = 0;
 	retries = 10;
 	while ((retries > 0) && (totalReceived < data_length)) {
 		received = sp_nonblocking_read(
-				current_port,
-				buffer + totalReceived,
-				data_length - totalReceived
-				);
+			current_port,
+			buffer + totalReceived,
+			data_length - totalReceived
+		);
 		if (received < 0) {
 			retries--;
 			continue;
@@ -157,25 +163,42 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	}
 	if (retries == 0) {
 		sr_dbg("Couldn't read data from device");
+		sp_free_port(current_port);
 		return NULL;
 	}
 	sr_dbg("Received version string \"%s\"", buffer);
 
 	if (strcmp(buffer, PSLELA_EXPECTED_VERSION)) {
 		sr_info("Found device with incompatible firmware version");
+		sp_free_port(current_port);
 		return NULL;
 	}
 	sr_info("Found device on %s", sp_get_port_description(current_port));
 
 	sp_close(current_port);
+	sp_free_port(current_port);
 
 	// At this point, we know the device is a correct PSLELA
 	// So we add it to the list of devices
 
-    // TODO create device
-    // TODO add 1 channel group
-    // TODO add the 8 logic channels to this group
-    // TODO add device to devices list
+	// Create new device instance
+	struct sr_dev_inst *device = sr_dev_inst_user_new(
+		"PSLELAvendor",
+		"PSLELAmodel",
+		PSLELA_EXPECTED_VERSION
+	);
+
+	// Add the 8 logic channels to it
+	char tmp[8][3];
+	for (unsigned char i = 0; i < 8; i++) {
+		sprintf(tmp[i], "D%i", i);
+		sr_dbg("Adding channel %s", tmp[i]);
+		sr_dev_inst_channel_add(device, i, SR_CHANNEL_LOGIC, tmp[i]);
+	}
+
+	// Add the device instance to the list of device instances
+	devices = g_slist_append(NULL, device);
+	drvc->instances = g_slist_append(drvc->instances, device);
 
 	return devices;
 }

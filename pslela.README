@@ -1,6 +1,6 @@
 doxygen Doxyfile
 ./autogen.sh
-./configure --disable-all-drivers --enable-pslela --enable-shared --enable-static
+./configure --disable-all-drivers --enable-pslela --enable-fx2lafw
 make -j 4
 LD_LIBRARY_PATH=$(pwd)/.libs:$(pwd)/bindings/cxx/.libs /usr/bin/pulseview
 

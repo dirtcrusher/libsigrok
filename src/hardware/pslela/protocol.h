@@ -45,8 +45,9 @@ struct pslela_cmd {
 void create_pslela_cmd_string(char **str, struct pslela_cmd *cmd);
 int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd);
 
-// TODO
 struct dev_context {
+	uint64_t cur_samplerate;
+	uint64_t cur_numsamples;
 };
 
 int hextobyte(const char hex[2], unsigned char *byte);

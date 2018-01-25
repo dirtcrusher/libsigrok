@@ -33,16 +33,19 @@ static const uint32_t drvopts[] = {
 };
 
 static const uint32_t devopts[] = {
+	SR_CONF_SAMPLERATE     | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_LIMIT_SAMPLES  | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
-static const uint64_t samplerates[] = {
+#define NUM_SAMPLERATES 3
+static const uint64_t samplerates[NUM_SAMPLERATES] = {
 	SR_HZ(1),
 	SR_KHZ(1),
-	SR_MHZ(1)
+	SR_MHZ(1),
 };
 
-static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di) {
-
+static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di)
+{
 	struct sr_dev_inst *device;
 	struct sp_port *device_port;
 	struct pslela_cmd request_cmd, response_cmd;
@@ -161,6 +164,8 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	device->connection_id = malloc(sizeof(char) * strlen(sp_get_port_name(current_port)));
 	strcpy(device->connection_id, sp_get_port_name(current_port));
 	device->driver = di;
+	device->priv = calloc(1, sizeof(struct dev_context));
+	((struct dev_context *) (device->priv))->cur_samplerate = samplerates[0];
 
 	// Add the 8 logic channels to it
 	sr_dbg("Adding logic channels");
@@ -277,17 +282,23 @@ static int dev_close(struct sr_dev_inst *sdi)
 static int config_get(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
+	struct dev_context *devc;
 	int ret;
+
+	devc = sdi->priv;
 
 	(void)sdi;
 	(void)data;
 	(void)cg;
 
-	sr_dbg("Config get");
-
 	ret = SR_OK;
 	switch (key) {
-		/* TODO */
+		case SR_CONF_SAMPLERATE:
+			*data = g_variant_new_uint64(devc->cur_samplerate);
+			break;
+		case SR_CONF_LIMIT_SAMPLES:
+			*data = g_variant_new_uint64(devc->cur_numsamples);
+			break;
 		default:
 			return SR_ERR_NA;
 	}
@@ -298,16 +309,29 @@ static int config_get(uint32_t key, GVariant **data,
 static int config_set(uint32_t key, GVariant *data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
+	struct dev_context *devc;
 	int ret;
+	uint64_t samplerate;
+
+	devc = sdi->priv;
 
 	(void)sdi;
 	(void)data;
 	(void)cg;
-	sr_dbg("Config set");
 
 	ret = SR_OK;
 	switch (key) {
-		/* TODO */
+		case SR_CONF_SAMPLERATE:
+			samplerate = g_variant_get_uint64(data);
+			if ((samplerate < samplerates[0])
+			    || (samplerate > samplerates[NUM_SAMPLERATES - 1])) {
+				return SR_ERR_ARG;
+			}
+			devc->cur_samplerate = samplerate;
+			break;
+		case SR_CONF_LIMIT_SAMPLES:
+			devc->cur_numsamples = g_variant_get_uint64(data);
+			break;
 		default:
 			ret = SR_ERR_NA;
 	}
@@ -323,13 +347,18 @@ static int config_list(uint32_t key, GVariant **data,
 	(void)sdi;
 	(void)data;
 	(void)cg;
-	sr_dbg("Config list");
 
 	ret = SR_OK;
 	switch (key) {
 	case SR_CONF_SCAN_OPTIONS:
 	case SR_CONF_DEVICE_OPTIONS:
 		return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts, devopts);
+	case SR_CONF_SAMPLERATE:
+		*data = std_gvar_samplerates(ARRAY_AND_SIZE(samplerates));
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		*data = std_gvar_tuple_u64(0, 1000 * 1000);
+		break;
 	default:
 		return SR_ERR_NA;
 	}

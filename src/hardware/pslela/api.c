@@ -22,9 +22,10 @@
 #include <stdlib.h>
 #include "protocol.h"
 
+#define SERIAL_COMM_CONF "115200/8n1"
+
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
-	SR_CONF_SERIALCOMM
 };
 
 static const uint32_t drvopts[] = {
@@ -32,10 +33,6 @@ static const uint32_t drvopts[] = {
 };
 
 static const uint32_t devopts[] = {
-	SR_CONF_SAMPLERATE         | SR_CONF_GET | SR_CONF_SET,
-	SR_CONF_PATTERN_MODE       | SR_CONF_GET | SR_CONF_SET,
-	SR_CONF_NUM_LOGIC_CHANNELS | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_ENABLED            | SR_CONF_GET | SR_CONF_SET,
 };
 
 static const uint64_t samplerates[] = {
@@ -44,61 +41,18 @@ static const uint64_t samplerates[] = {
 	SR_MHZ(1)
 };
 
-static GSList *scan(struct sr_dev_driver *di, GSList *options)
-{
-	sr_dbg("Starting scan");
+static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di) {
 
-	GSList *devices, *options_iter;
-	struct drv_context *driver_context;
 	struct sr_dev_inst *device;
-	struct sr_config *options_iter_data;
-	struct sp_port *current_port;
+	struct sp_port *device_port;
 	struct pslela_cmd request_cmd, response_cmd;
-	const char *connexion_string, *serial_comm_string;
 	char *request_string, buffer[300] = {0}, bytes_received;
 	char channel_strings[8][3];
 	unsigned int retries;
 	unsigned char totalReceived, i;
 
-	// Initialize context
-	devices = NULL;
-	driver_context = di->context;
-	driver_context->instances = NULL;
+	sr_dbg("Probing '%s'", sp_get_port_name(current_port));
 
-	// Get connexion info from options
-	connexion_string = NULL;
-	serial_comm_string = NULL;
-	options_iter = options;
-	while (options_iter != NULL) {
-		options_iter_data = options_iter->data;
-		switch (options_iter_data->key) {
-			case SR_CONF_CONN:
-				connexion_string = g_variant_get_string(
-					options_iter_data->data,
-					NULL
-				);
-				break;
-			case SR_CONF_SERIALCOMM:
-				serial_comm_string = g_variant_get_string(
-						options_iter_data->data,
-						NULL
-				);
-				break;
-		}
-		options_iter = options_iter->next;
-	}
-
-	if (!connexion_string) {
-		return NULL;
-	}
-	if (!serial_comm_string) {
-		serial_comm_string = "115200/8n1";
-	}
-
-	// Probe the serial port
-	sr_dbg("Probing '%s' with options '%s'", connexion_string, serial_comm_string);
-
-	sp_get_port_by_name(connexion_string, &current_port);
 	if (sp_open(current_port, SP_MODE_READ_WRITE) != SP_OK) {
 		sr_dbg("Couldn't open port");
 		sp_free_port(current_port);
@@ -192,7 +146,6 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	sr_info("Found device on %s", sp_get_port_description(current_port));
 
 	sp_close(current_port);
-	sp_free_port(current_port);
 
 	// At this point, we know the device is a correct PSLELA
 	// So we add it to the list of devices
@@ -203,12 +156,81 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		"PSLELAmodel",
 		PSLELA_EXPECTED_VERSION
 	);
+	sp_copy_port(current_port, &device_port);
+	device->conn = device_port;
+	device->connection_id = malloc(sizeof(char) * strlen(sp_get_port_name(current_port)));
+	strcpy(device->connection_id, sp_get_port_name(current_port));
+	device->driver = di;
 
 	// Add the 8 logic channels to it
+	sr_dbg("Adding logic channels");
 	for (i = 0; i < 8; i++) {
 		sprintf(channel_strings[i], "D%i", i);
-		sr_dbg("Adding channel %s", channel_strings[i]);
 		sr_dev_inst_channel_add(device, i, SR_CHANNEL_LOGIC, channel_strings[i]);
+	}
+
+	return device;
+}
+
+static GSList *scan(struct sr_dev_driver *di, GSList *options)
+{
+	GSList *devices, *options_iter;
+	struct drv_context *driver_context;
+	struct sr_dev_inst *device;
+	struct sr_config *options_iter_data;
+	const char *connexion_string;
+	struct sp_port **all_ports, *current_port;
+	unsigned int i;
+
+	sr_dbg("Starting scan");
+
+	// Initialize context
+	devices = NULL;
+	driver_context = di->context;
+	driver_context->instances = NULL;
+
+	// Get connexion info from options
+	connexion_string = NULL;
+	options_iter = options;
+	while (options_iter != NULL) {
+		options_iter_data = options_iter->data;
+		switch (options_iter_data->key) {
+			case SR_CONF_CONN:
+				connexion_string = g_variant_get_string(
+					options_iter_data->data,
+					NULL
+				);
+				break;
+		}
+		options_iter = options_iter->next;
+	}
+
+	if (!connexion_string) {
+		// Scan all serial ports
+		sp_list_ports(&all_ports);
+
+		i = 0;
+		while (*(all_ports + i) != NULL) {
+			device = probe(*(all_ports + i), di);
+			if (device != NULL) {
+				devices = g_slist_append(devices, device);
+				driver_context->instances = g_slist_append(
+					driver_context->instances,
+					device
+				);
+			}
+			i++;
+		}
+		sp_free_port_list(all_ports);
+		return devices;
+	}
+
+	// Else, we try to connect to the defined port
+	sp_get_port_by_name(connexion_string, &current_port);
+	device = probe(current_port, di);
+	sp_free_port(current_port);
+	if (!device) {
+		return NULL;
 	}
 
 	// Add the device instance to the list of device instances
@@ -222,7 +244,15 @@ static int dev_open(struct sr_dev_inst *sdi)
 {
 	(void)sdi;
 
-	/* TODO: get handle from sdi->conn and open it. */
+	sr_dbg("Device open");
+
+	if (!sdi || !sdi->conn) {
+		return SR_ERR_ARG;
+	}
+
+	if (sp_open(sdi->conn, SP_MODE_READ_WRITE) < 0) {
+		return SR_ERR_IO;
+	}
 
 	return SR_OK;
 }
@@ -231,7 +261,15 @@ static int dev_close(struct sr_dev_inst *sdi)
 {
 	(void)sdi;
 
-	/* TODO: get handle from sdi->conn and close it. */
+	sr_dbg("Device close");
+
+	if (!sdi || !sdi->conn) {
+		return SR_ERR_ARG;
+	}
+
+	if (sp_close(sdi->conn) < 0) {
+		return SR_ERR_IO;
+	}
 
 	return SR_OK;
 }
@@ -304,6 +342,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	/* TODO: configure hardware, reset acquisition state, set up
 	 * callbacks and send header packet. */
 
+	sr_dbg("Device acq start");
+
 	(void)sdi;
 
 	return SR_OK;
@@ -312,6 +352,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
 	/* TODO: stop acquisition. */
+
+	sr_dbg("Device acq stop");
 
 	(void)sdi;
 

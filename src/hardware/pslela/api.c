@@ -121,12 +121,10 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	free(request_string);
 
 	retries = 10;
-	while (retries > 0) {
-		if (sp_output_waiting(current_port) != 0) {
-			retries--;
-			g_usleep(10);
-			continue;
-		}
+	while ((retries > 0) && (sp_output_waiting(current_port) != 0)) {
+		retries--;
+		g_usleep(10);
+		continue;
 	}
 	if (retries == 0) {
 		sr_dbg("Couldn't write to port");
@@ -143,10 +141,11 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			buffer + totalReceived,
 			3 - totalReceived
 		);
-		if (bytes_received < 0) {
+		if (bytes_received <= 0) {
 			retries--;
 			continue;
 		}
+		g_usleep(10);
 		totalReceived += bytes_received;
 	}
 	if (retries == 0) {

@@ -22,16 +22,50 @@
 #include <string.h>
 #include "protocol.h"
 
-void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd) {
+int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
+{
+	char *cmd_str;
+	create_pslela_cmd_string(&cmd_str, cmd);
+	sr_dbg("Sending command: %s", cmd_str);
+	if ((sp_blocking_write(port, cmd_str, strlen(cmd_str), 0) < 0)
+			|| (sp_drain(port)) < 0) {
+		sr_err("Error sending command to device");
+		free(cmd_str);
+		return SR_ERR_IO;
+	}
+	free(cmd_str);
+	sr_dbg("Finished sending command");
+	return SR_OK;
+}
+
+int read_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
+{
+	char response_header[4] = {0};
+	sr_dbg("Reading response");
+	if (sp_blocking_read(port, response_header, 3, 0) < 0) {
+		sr_err("Error reading data header from device");
+		return SR_ERR_IO;
+	}
+	parse_pslela_cmd_string(response_header, &cmd);
+	if (sp_blocking_read(port, cmd->buff, cmd->len, 0) < 0) {
+		sr_err("Error reading data from device");
+		return SR_ERR_IO;
+	}
+	sr_dbg("Finished reading response");
+	return SR_OK;
+}
+
+
+void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
+{
 	char tmp_byte_hex[2];
-	unsigned int i;
 
 	// Allocate command string
 	*str = calloc(
-		1 // Command code
-		+ 2 // Command length
-		+ (cmd->len * 2) // Data
-		+ 1 // Null terminator
+		1          // Command code
+		+ 2        // Command length
+		+ cmd->len // Data
+		+ 1        // Null terminator
 		, sizeof(char)
 	);
 
@@ -43,14 +77,12 @@ void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd) {
 	strncat(*str, tmp_byte_hex, 2);
 
 	// Append data characters
-	for (i = 0; i < cmd->len; i++) {
-		bytetohex(cmd->buff[i], tmp_byte_hex);
-		strncat(*str, tmp_byte_hex, 2);
-	}
+	strncat(*str, cmd->buff, cmd->len);
 }
 
-int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd) {
-	unsigned char tmp_byte, i;
+int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd)
+{
+	unsigned char tmp_byte;
 	int total_len;
 
 	// Verify that the string is at least the minimum size
@@ -67,20 +99,18 @@ int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd) {
 	cmd->len = tmp_byte;
 
 	// Verify that the string contains all the data
-	if (total_len < (3 + (cmd->len * 2))) {
+	if (total_len < (3 + cmd->len)) {
 		return 1;
 	}
 
-	// Parse data
-	for (i = 0; i < cmd->len; i++) {
-		hextobyte(str + 3 + (i * 2), &tmp_byte);
-		cmd->buff[i] = tmp_byte;
-	}
+	// Copy data
+	strncpy(cmd->buff, str + 3, cmd->len);
 	return 0;
 }
 
 
-int hextobyte(const char hex[2], unsigned char *byte) {
+int hextobyte(const char hex[2], unsigned char *byte)
+{
 	unsigned char upper, lower;
 
 	if ('a' <= hex[0] && hex[0] <= 'f') {
@@ -109,7 +139,8 @@ int hextobyte(const char hex[2], unsigned char *byte) {
 	return 0;
 }
 
-int bytetohex(const unsigned char byte, char hex[2]) {
+int bytetohex(const unsigned char byte, char hex[2])
+{
 	unsigned char half;
 
 	half = byte & 0xf;
@@ -130,3 +161,23 @@ int bytetohex(const unsigned char byte, char hex[2]) {
 	return 0;
 }
 
+int hextou32(const char hex[8], uint32_t *val)
+{
+	int ret;
+	unsigned char *c = (unsigned char*) val;
+
+	ret = hextobyte(&hex[0], &c[3]);
+	ret = hextobyte(hex + 2, &c[2]);
+	ret = hextobyte(hex + 4, &c[1]);
+	ret = hextobyte(hex + 6, &c[0]);
+
+	return ret;
+}
+
+void u32tohex(const uint32_t val, char hex[8])
+{
+	bytetohex((val >> 24), hex);
+	bytetohex((val >> 16), &hex[2]);
+	bytetohex((val >>  8), &hex[4]);
+	bytetohex((val >>  0), &hex[6]);
+}

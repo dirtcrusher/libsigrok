@@ -42,6 +42,9 @@ struct pslela_cmd {
 	char buff[256];
 };
 
+int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd);
+int read_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd);
+
 void create_pslela_cmd_string(char **str, struct pslela_cmd *cmd);
 int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd);
 
@@ -52,5 +55,7 @@ struct dev_context {
 
 int hextobyte(const char hex[2], unsigned char *byte);
 int bytetohex(const unsigned char byte, char hex[2]);
+int hextou32(const char hex[8], uint32_t *val);
+void u32tohex(const uint32_t val, char hex[8]);
 
 #endif

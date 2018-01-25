@@ -146,11 +146,11 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 		sp_free_port(current_port);
 		return NULL;
 	}
-	sr_info("Found device on %s", sp_get_port_description(current_port));
-
 	sp_close(current_port);
 
 	// At this point, we know the device is a correct PSLELA
+	sr_info("Found device on %s", sp_get_port_description(current_port));
+
 	// So we add it to the list of devices
 
 	// Create new device instance
@@ -366,25 +366,99 @@ static int config_list(uint32_t key, GVariant **data,
 	return ret;
 }
 
-static int dev_acquisition_start(const struct sr_dev_inst *sdi)
+static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
-	/* TODO: configure hardware, reset acquisition state, set up
-	 * callbacks and send header packet. */
+	sr_dbg("Device acq stop");
 
-	sr_dbg("Device acq start");
+	// TODO NOOP?
 
 	(void)sdi;
 
 	return SR_OK;
 }
 
-static int dev_acquisition_stop(struct sr_dev_inst *sdi)
+static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
-	/* TODO: stop acquisition. */
+	int err;
+	struct pslela_cmd cmd, response;
+	unsigned char *buffer;
+	unsigned int i;
+	struct sr_datafeed_logic packet_contents;
+	struct sr_datafeed_packet packet;
 
-	sr_dbg("Device acq stop");
+	sr_dbg("Device acq start");
 
-	(void)sdi;
+	// Send start command
+	cmd.code = PSLELA_CMD_START_CAPTURE;
+	cmd.len = 48;
+
+#define START_PATTERN        0xDEADBEEF
+#define START_PATTERN_LENGTH 32
+#define STOP_PATTERN         0xDEADC0DE
+#define STOP_PATTERN_LENGTH  32
+#define SYNCHRONOUS_MODE     0
+#define TRIGGER_SELECT_LINE  2
+	// TODO calculate freq_div parameters
+	// TODO send correct amount of KiSamples
+	u32tohex(0x00000001,            cmd.buff +  0); // DIVID_NUM
+	u32tohex(0x00000010,            cmd.buff +  8); // DIVID_DENOM
+	u32tohex(0x00000001,            cmd.buff + 16); // KISAMPLES
+	u32tohex(START_PATTERN,         cmd.buff + 24);
+	u32tohex(STOP_PATTERN,          cmd.buff + 32);
+	bytetohex(SYNCHRONOUS_MODE,     cmd.buff + 40);
+	bytetohex(TRIGGER_SELECT_LINE,  cmd.buff + 42);
+	bytetohex(START_PATTERN_LENGTH, cmd.buff + 44);
+	bytetohex(STOP_PATTERN_LENGTH,  cmd.buff + 46);
+
+	if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
+		return err;
+	}
+
+	// Wait for capture finish
+	cmd.code = PSLELA_CMD_READ_CAPTURE;
+	cmd.len = 0;
+
+	do {
+		g_usleep(10);
+		if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
+			return err;
+		}
+		if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
+			return err;
+		}
+	} while (response.code == PSLELA_CMD_ERROR);
+
+	// Read capture response
+	do {
+		sr_dbg("Received %i data characters", response.len);
+
+		// Prepare packet
+		packet_contents.length = response.len / 2;
+		packet_contents.unitsize = 8;
+
+		buffer = malloc(packet_contents.length * sizeof(char));
+		for (i = 0; i < packet_contents.length; i += 2) {
+			hextobyte(response.buff + (2 * i), buffer + i);
+		}
+
+		packet.type = SR_DF_LOGIC;
+		packet.payload = buffer;
+
+		// Send packet
+		sr_session_send(sdi, &packet);
+		free(buffer);
+
+		// Read next data
+		if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
+			return err;
+		}
+		if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
+			return err;
+		}
+	} while (response.len != 0);
+
+	// Stop capture
+	dev_acquisition_stop((struct sr_dev_inst*)sdi);
 
 	return SR_OK;
 }

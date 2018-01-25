@@ -48,38 +48,57 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
 	sr_dbg("Starting scan");
 
-	GSList *devices = NULL;
-	struct drv_context *drvc = di->context;
-	drvc->instances = NULL;
+	GSList *devices, *options_iter;
+	struct drv_context *driver_context;
+	struct sr_dev_inst *device;
+	struct sr_config *options_iter_data;
+	struct sp_port *current_port;
+	struct pslela_cmd request_cmd, response_cmd;
+	const char *connexion_string, *serial_comm_string;
+	char *request_string, buffer[300] = {0}, bytes_received;
+	char channel_strings[8][3];
+	unsigned int retries;
+	unsigned char totalReceived, i;
+
+	// Initialize context
+	devices = NULL;
+	driver_context = di->context;
+	driver_context->instances = NULL;
 
 	// Get connexion info from options
-	const char *conn = NULL, *serial_comm = NULL;
-	GSList *l = options;
-	while (l != NULL) {
-		struct sr_config *sr_conf = l->data;
-		switch (sr_conf->key) {
+	connexion_string = NULL;
+	serial_comm_string = NULL;
+	options_iter = options;
+	while (options_iter != NULL) {
+		options_iter_data = options_iter->data;
+		switch (options_iter_data->key) {
 			case SR_CONF_CONN:
-				conn = g_variant_get_string(sr_conf->data, NULL);
+				connexion_string = g_variant_get_string(
+					options_iter_data->data,
+					NULL
+				);
 				break;
 			case SR_CONF_SERIALCOMM:
-				serial_comm = g_variant_get_string(sr_conf->data, NULL);
+				serial_comm_string = g_variant_get_string(
+						options_iter_data->data,
+						NULL
+				);
 				break;
 		}
-		l = l->next;
+		options_iter = options_iter->next;
 	}
 
-	if (!conn) {
+	if (!connexion_string) {
 		return NULL;
 	}
-	if (!serial_comm) {
-		serial_comm = "9600/8n1";
+	if (!serial_comm_string) {
+		serial_comm_string = "115200/8n1";
 	}
 
 	// Probe the serial port
-	sr_dbg("Probing '%s' with options '%s'", conn, serial_comm);
+	sr_dbg("Probing '%s' with options '%s'", connexion_string, serial_comm_string);
 
-	struct sp_port *current_port;
-	sp_get_port_by_name(conn, &current_port);
+	sp_get_port_by_name(connexion_string, &current_port);
 	if (sp_open(current_port, SP_MODE_READ_WRITE) != SP_OK) {
 		sr_dbg("Couldn't open port");
 		sp_free_port(current_port);
@@ -91,18 +110,17 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	sp_flush(current_port, SP_BUF_BOTH);
 
 	// We attempt to write a "get version" command to the port
-	struct pslela_cmd request_version;
-	request_version.code = PSLELA_CMD_READ_VERSION;
-	request_version.len = 0;
-	char *version_command;
-	create_pslela_cmd_string(&version_command, &request_version);
-	if (sp_nonblocking_write(current_port, version_command, 3) < 0) {
+	request_cmd.code = PSLELA_CMD_READ_VERSION;
+	request_cmd.len = 0;
+	create_pslela_cmd_string(&request_string, &request_cmd);
+	if (sp_nonblocking_write(current_port, request_string, 3) < 0) {
 		sr_dbg("Couldn't write to port");
 		sp_free_port(current_port);
 		return NULL;
 	}
-	free(version_command);
-	unsigned int retries = 10;
+	free(request_string);
+
+	retries = 10;
 	while (retries > 0) {
 		if (sp_output_waiting(current_port) != 0) {
 			retries--;
@@ -118,20 +136,18 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 
 	// We attempt to read the response
 	retries = 10;
-	char buffer[300] = {0};
-	unsigned char totalReceived = 0;
-	char received;
+	totalReceived = 0;
 	while ((retries > 0) && (totalReceived < 3)) {
-		received = sp_nonblocking_read(
+		bytes_received = sp_nonblocking_read(
 			current_port,
 			buffer + totalReceived,
 			3 - totalReceived
 		);
-		if (received < 0) {
+		if (bytes_received < 0) {
 			retries--;
 			continue;
 		}
-		totalReceived += received;
+		totalReceived += bytes_received;
 	}
 	if (retries == 0) {
 		sr_dbg("Couldn't read from port");
@@ -139,9 +155,8 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	}
 	sr_dbg("Received %c%c%c", buffer[0], buffer[1], buffer[2]);
 
-	struct pslela_cmd version_response;
-	if ((parse_pslela_cmd_string(buffer, &version_response) < 0)
-		|| (version_response.code != PSLELA_CMD_SUCCESS)) {
+	if ((parse_pslela_cmd_string(buffer, &response_cmd) < 0)
+		|| (response_cmd.code != PSLELA_CMD_SUCCESS)) {
 		sr_dbg("Received incorrect response from device");
 		sp_free_port(current_port);
 		return NULL;
@@ -150,27 +165,27 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	// We read the version string
 	totalReceived = 0;
 	retries = 10;
-	while ((retries > 0) && (totalReceived < version_response.len)) {
-		received = sp_nonblocking_read(
+	while ((retries > 0) && (totalReceived < response_cmd.len)) {
+		bytes_received = sp_nonblocking_read(
 			current_port,
 			buffer + 3 + totalReceived,
-			version_response.len - totalReceived
+			response_cmd.len - totalReceived
 		);
-		if (received < 0) {
+		if (bytes_received < 0) {
 			retries--;
 			continue;
 		}
-		totalReceived += received;
+		totalReceived += bytes_received;
 	}
 	if (retries == 0) {
 		sr_dbg("Couldn't read data from device");
 		sp_free_port(current_port);
 		return NULL;
 	}
-	parse_pslela_cmd_string(buffer, &version_response);
-	sr_dbg("Received version string \"%s\"", version_response.buff);
+	parse_pslela_cmd_string(buffer, &response_cmd);
+	sr_dbg("Received version string \"%s\"", response_cmd.buff);
 
-	if (strcmp(version_response.buff, PSLELA_EXPECTED_VERSION)) {
+	if (strcmp(response_cmd.buff, PSLELA_EXPECTED_VERSION)) {
 		sr_info("Found device with incompatible firmware version");
 		sp_free_port(current_port);
 		return NULL;
@@ -184,23 +199,22 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 	// So we add it to the list of devices
 
 	// Create new device instance
-	struct sr_dev_inst *device = sr_dev_inst_user_new(
+	device = sr_dev_inst_user_new(
 		"PSLELAvendor",
 		"PSLELAmodel",
 		PSLELA_EXPECTED_VERSION
 	);
 
 	// Add the 8 logic channels to it
-	char tmp[8][3];
-	for (unsigned char i = 0; i < 8; i++) {
-		sprintf(tmp[i], "D%i", i);
-		sr_dbg("Adding channel %s", tmp[i]);
-		sr_dev_inst_channel_add(device, i, SR_CHANNEL_LOGIC, tmp[i]);
+	for (i = 0; i < 8; i++) {
+		sprintf(channel_strings[i], "D%i", i);
+		sr_dbg("Adding channel %s", channel_strings[i]);
+		sr_dev_inst_channel_add(device, i, SR_CHANNEL_LOGIC, channel_strings[i]);
 	}
 
 	// Add the device instance to the list of device instances
 	devices = g_slist_append(NULL, device);
-	drvc->instances = g_slist_append(drvc->instances, device);
+	driver_context->instances = g_slist_append(driver_context->instances, device);
 
 	return devices;
 }

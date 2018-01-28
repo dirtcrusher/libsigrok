@@ -25,10 +25,18 @@
 int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
 {
 	char *cmd_str;
+	int retries, ret;
 	create_pslela_cmd_string(&cmd_str, cmd);
 	sr_dbg("Sending command: %s", cmd_str);
-	if ((sp_blocking_write(port, cmd_str, strlen(cmd_str), 0) < 0)
-			|| (sp_drain(port)) < 0) {
+	retries = 10;
+	while ((retries > 0) && ((ret = sp_nonblocking_write(port, cmd_str, strlen(cmd_str))) < 0)) {
+		if (ret != 0) {
+			sr_dbg("write return value: %i", ret);
+		}
+		retries--;
+		g_usleep(100000);
+	}
+	if ((ret < 0) || (retries == 0)) {
 		sr_err("Error sending command to device");
 		free(cmd_str);
 		return SR_ERR_IO;
@@ -41,13 +49,27 @@ int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
 int read_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
 {
 	char response_header[4] = {0};
+	int retries, ret;
 	sr_dbg("Reading response");
-	if (sp_blocking_read(port, response_header, 3, 0) < 0) {
+	retries = 10;
+	while ((retries > 0) && ((ret = sp_nonblocking_read(port, response_header, 3)) >= 0)) {
+		if (ret != 0) {
+			sr_dbg("read return value: %i", ret);
+		}
+		retries--;
+		g_usleep(100000);
+	}
+	if ((ret < 0) || (retries == 0)) {
 		sr_err("Error reading data header from device");
 		return SR_ERR_IO;
 	}
-	parse_pslela_cmd_string(response_header, &cmd);
-	if (sp_blocking_read(port, cmd->buff, cmd->len, 0) < 0) {
+	parse_pslela_cmd_string(response_header, cmd);
+	retries = 10;
+	while ((retries > 0) && ((ret = sp_nonblocking_read(port, cmd->buff, cmd->len) >= 0))) {
+		retries--;
+		g_usleep(100000);
+	}
+	if ((ret < 0) || (retries == 0)) {
 		sr_err("Error reading data from device");
 		return SR_ERR_IO;
 	}
@@ -61,13 +83,7 @@ void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
 	char tmp_byte_hex[2];
 
 	// Allocate command string
-	*str = calloc(
-		1          // Command code
-		+ 2        // Command length
-		+ cmd->len // Data
-		+ 1        // Null terminator
-		, sizeof(char)
-	);
+	*str = calloc(4, sizeof(char));
 
 	// Append code character
 	strncat(*str, &cmd->code, 1);
@@ -75,9 +91,6 @@ void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
 	// Append len characters
 	bytetohex(cmd->len, tmp_byte_hex);
 	strncat(*str, tmp_byte_hex, 2);
-
-	// Append data characters
-	strncat(*str, cmd->buff, cmd->len);
 }
 
 int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd)

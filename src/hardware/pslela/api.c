@@ -20,6 +20,7 @@
 #include <config.h>
 #include <string.h>
 #include <stdlib.h>
+#include <termios.h>
 #include "protocol.h"
 
 #define SERIAL_COMM_CONF "115200/8n1"
@@ -44,113 +45,125 @@ static const uint64_t samplerates[NUM_SAMPLERATES] = {
 	SR_MHZ(1),
 };
 
+// Complete definition of sp_port as defined in libserialport_internal.h
+// Really bad practice for putting this here, but there is no other way for
+// changing tty flags (except not using libserialport...)
+struct sp_port {
+	char *name;
+	char *description;
+	enum sp_transport transport;
+	int usb_bus;
+	int usb_address;
+	int usb_vid;
+	int usb_pid;
+	char *usb_manufacturer;
+	char *usb_product;
+	char *usb_serial;
+	char *bluetooth_address;
+	int fd;
+};
+
+
 static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di)
 {
 	struct sr_dev_inst *device;
 	struct sp_port *device_port;
 	struct pslela_cmd request_cmd, response_cmd;
-	char *request_string, buffer[300] = {0}, bytes_received;
+	char *request_string;
 	char channel_strings[8][3];
-	unsigned int retries;
-	unsigned char totalReceived, i;
+	unsigned char i;
+	int ret;
 
+	//sp_set_debug_handler(printf);
 	sr_dbg("Probing '%s'", sp_get_port_name(current_port));
 
+	// We open the port
 	if (sp_open(current_port, SP_MODE_READ_WRITE) != SP_OK) {
 		sr_dbg("Couldn't open port");
-		sp_free_port(current_port);
 		return NULL;
 	}
+
+	// We configure the port
+	struct sp_port_config *port_config = NULL;
+	sp_new_config(&port_config);
+	sp_set_config_baudrate(port_config, 115200);
+	sp_set_config_bits(port_config, 8);
+	sp_set_config_parity(port_config, SP_PARITY_NONE);
+	sp_set_config_stopbits(port_config, 1);
+	sp_set_config_xon_xoff(port_config, SP_XONXOFF_DISABLED);
+
+	if (sp_set_config(current_port, port_config) < 0) {
+		sr_dbg("Couldn't configure port");
+		sp_free_config(port_config);
+		return NULL;
+	}
+	sp_free_config(port_config);
+
+	// Since libserialport does some bad configuration, we manually remove
+	// the ECHONL flag from the termios struct
+	// NOTE: only works on Linux
+	struct termios termios_p;
+	tcgetattr(current_port->fd, &termios_p);
+	termios_p.c_lflag &= ~ECHONL;
+	tcsetattr(current_port->fd, TCSANOW, &termios_p);
 
 	// The port has been opened
 	// We flush all buffers for good measure
 	sp_flush(current_port, SP_BUF_BOTH);
 
+	// We write a lot of 0s so that we can synchronize with the device
+	request_string = calloc(260, sizeof(char));
+	if (sp_nonblocking_write(current_port, request_string, 260) < 0) {
+		sr_dbg("Couldn't write to port");
+		free(request_string);
+		sp_close(current_port);
+		return NULL;
+	}
+
 	// We attempt to write a "get version" command to the port
 	request_cmd.code = PSLELA_CMD_READ_VERSION;
 	request_cmd.len = 0;
-	create_pslela_cmd_string(&request_string, &request_cmd);
-	if (sp_nonblocking_write(current_port, request_string, 3) < 0) {
-		sr_dbg("Couldn't write to port");
-		sp_free_port(current_port);
+	if (send_pslela_cmd(current_port, &request_cmd) < 0) {
+		sr_dbg("Couldn't write command to port");
+		sp_close(current_port);
 		return NULL;
 	}
-	free(request_string);
 
-	retries = 10;
-	while ((retries > 0) && (sp_output_waiting(current_port) != 0)) {
-		retries--;
-		g_usleep(10);
-		continue;
+	sr_dbg("Emptying write buffer to port");
+	unsigned int retries = 10;
+	while ((retries > 0) && ((ret = sp_output_waiting(current_port)) > 0)) {
+	    if (ret < 0) {
+		    sr_dbg("Error while emptying write buffer to port");
+		    sp_close(current_port);
+		    return NULL;
+	    }
+	    retries--;
+	    g_usleep(100000);
 	}
-	if (retries == 0) {
-		sr_dbg("Couldn't write to port");
-		sp_free_port(current_port);
-		return NULL;
+	if ((retries == 0) || (ret < 0)) {
+	    sr_dbg("Couldn't empty write buffer to port");
+	    sp_close(current_port);
+	    return NULL;
 	}
 
 	// We attempt to read the response
-	retries = 10;
-	totalReceived = 0;
-	while ((retries > 0) && (totalReceived < 3)) {
-		bytes_received = sp_nonblocking_read(
-			current_port,
-			buffer + totalReceived,
-			3 - totalReceived
-		);
-		if (bytes_received <= 0) {
-			retries--;
-			continue;
-		}
-		g_usleep(10);
-		totalReceived += bytes_received;
-	}
-	if (retries == 0) {
-		sr_dbg("Couldn't read from port");
+	if (read_pslela_cmd(current_port, &request_cmd) < 0) {
+		sr_dbg("Couldn't read version from port");
+		sp_close(current_port);
 		return NULL;
 	}
-	sr_dbg("Received %c%c%c", buffer[0], buffer[1], buffer[2]);
+	sr_dbg("%c %i %s", response_cmd.code, response_cmd.len, response_cmd.buff);
 
-	if ((parse_pslela_cmd_string(buffer, &response_cmd) < 0)
-		|| (response_cmd.code != PSLELA_CMD_SUCCESS)) {
-		sr_dbg("Received incorrect response from device");
-		sp_free_port(current_port);
-		return NULL;
-	}
-
-	// We read the version string
-	totalReceived = 0;
-	retries = 10;
-	while ((retries > 0) && (totalReceived < response_cmd.len)) {
-		bytes_received = sp_nonblocking_read(
-			current_port,
-			buffer + 3 + totalReceived,
-			response_cmd.len - totalReceived
-		);
-		if (bytes_received < 0) {
-			retries--;
-			continue;
-		}
-		totalReceived += bytes_received;
-	}
-	if (retries == 0) {
-		sr_dbg("Couldn't read data from device");
-		sp_free_port(current_port);
-		return NULL;
-	}
-	parse_pslela_cmd_string(buffer, &response_cmd);
-	sr_dbg("Received version string \"%s\"", response_cmd.buff);
-
+	// We test the version string
 	if (strcmp(response_cmd.buff, PSLELA_EXPECTED_VERSION)) {
 		sr_info("Found device with incompatible firmware version");
-		sp_free_port(current_port);
+		sp_close(current_port);
 		return NULL;
 	}
 	sp_close(current_port);
 
 	// At this point, we know the device is a correct PSLELA
 	sr_info("Found device on %s", sp_get_port_description(current_port));
-
 	// So we add it to the list of devices
 
 	// Create new device instance
@@ -226,6 +239,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			}
 			i++;
 		}
+		sr_dbg("Freeing port list");
 		sp_free_port_list(all_ports);
 		return devices;
 	}

@@ -38,12 +38,33 @@ static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_SAMPLES  | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 };
 
-#define NUM_SAMPLERATES 3
-static const uint64_t samplerates[NUM_SAMPLERATES] = {
+static const uint64_t samplerates[] = {
 	SR_HZ(1),
+	SR_HZ(5),
+	SR_HZ(10),
+	SR_HZ(50),
+	SR_HZ(100),
+	SR_HZ(500),
 	SR_KHZ(1),
+	SR_KHZ(5),
+	SR_KHZ(10),
+	SR_KHZ(50),
+	SR_KHZ(100),
+	SR_KHZ(500),
 	SR_MHZ(1),
+	SR_MHZ(10),
+	SR_MHZ(20),
+	SR_MHZ(30),
+	SR_MHZ(40),
+	SR_MHZ(50),
+	SR_MHZ(60),
+	SR_MHZ(70),
+	SR_MHZ(80),
+	SR_MHZ(90),
+	SR_MHZ(100),
 };
+#define NUM_SAMPLERATES (ARRAY_SIZE(samplerates))
+
 
 // Complete definition of sp_port as defined in libserialport_internal.h
 // Really bad practice for putting this here, but there is no other way for
@@ -66,15 +87,17 @@ struct sp_port {
 
 static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di)
 {
-	struct sr_dev_inst *device;
-	struct sp_port *device_port;
-	struct pslela_cmd request_cmd, response_cmd;
+	struct pslela_cmd     cmd;
+	struct sp_port        *device_port;
+	struct sp_port_config *port_config;
+	struct sr_dev_inst    *device;
+	struct termios         termios_p;
+	char  channel_strings[8][3];
 	char *request_string;
-	char channel_strings[8][3];
 	unsigned char i;
+	unsigned int  retries;
 	int ret;
 
-	//sp_set_debug_handler(printf);
 	sr_dbg("Probing '%s'", sp_get_port_name(current_port));
 
 	// We open the port
@@ -84,13 +107,13 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	}
 
 	// We configure the port
-	struct sp_port_config *port_config = NULL;
+	port_config = NULL;
 	sp_new_config(&port_config);
 	sp_set_config_baudrate(port_config, 115200);
 	sp_set_config_bits(port_config, 8);
 	sp_set_config_parity(port_config, SP_PARITY_NONE);
 	sp_set_config_stopbits(port_config, 1);
-	sp_set_config_xon_xoff(port_config, SP_XONXOFF_DISABLED);
+	sp_set_config_xon_xoff(port_config, SP_XONXOFF_OUT);
 
 	if (sp_set_config(current_port, port_config) < 0) {
 		sr_dbg("Couldn't configure port");
@@ -102,18 +125,28 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	// Since libserialport does some bad configuration, we manually remove
 	// the ECHONL flag from the termios struct
 	// NOTE: only works on Linux
-	struct termios termios_p;
 	tcgetattr(current_port->fd, &termios_p);
-	termios_p.c_lflag &= ~ECHONL;
-	tcsetattr(current_port->fd, TCSANOW, &termios_p);
+	termios_p.c_cc[VMIN]=0;
+	termios_p.c_cc[VTIME]=0;
+	termios_p.c_cflag &= ~(HUPCL);
+	termios_p.c_iflag |= IGNBRK;
+	termios_p.c_iflag &= ~(IGNPAR | IXANY);
+	termios_p.c_lflag &= ~(ECHOE | ECHOK);
+	if (tcsetattr(current_port->fd, TCSAFLUSH, &termios_p) < 0) {
+		sr_dbg("Couldn't manually configure port");
+		sp_close(current_port);
+		return NULL;
+	}
 
 	// The port has been opened
 	// We flush all buffers for good measure
 	sp_flush(current_port, SP_BUF_BOTH);
 
 	// We write a lot of 0s so that we can synchronize with the device
-	request_string = calloc(260, sizeof(char));
-	if (sp_nonblocking_write(current_port, request_string, 260) < 0) {
+	request_string = malloc(sizeof(char) * 260);
+	memset(request_string, '0', sizeof(char) * 259);
+	request_string[259] = 0;
+	if (sp_nonblocking_write(current_port, request_string, 259) < 0) {
 		sr_dbg("Couldn't write to port");
 		free(request_string);
 		sp_close(current_port);
@@ -121,16 +154,16 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	}
 
 	// We attempt to write a "get version" command to the port
-	request_cmd.code = PSLELA_CMD_READ_VERSION;
-	request_cmd.len = 0;
-	if (send_pslela_cmd(current_port, &request_cmd) < 0) {
+	cmd.code = PSLELA_CMD_READ_VERSION;
+	cmd.len = 0;
+	if (send_pslela_cmd(current_port, &cmd) < 0) {
 		sr_dbg("Couldn't write command to port");
 		sp_close(current_port);
 		return NULL;
 	}
 
 	sr_dbg("Emptying write buffer to port");
-	unsigned int retries = 10;
+	retries = 10;
 	while ((retries > 0) && ((ret = sp_output_waiting(current_port)) > 0)) {
 	    if (ret < 0) {
 		    sr_dbg("Error while emptying write buffer to port");
@@ -147,22 +180,23 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	}
 
 	// We attempt to read the response
-	if (read_pslela_cmd(current_port, &request_cmd) < 0) {
+	sr_dbg("Reading version from port");
+	if (read_pslela_cmd(current_port, &cmd) < 0) {
 		sr_dbg("Couldn't read version from port");
 		sp_close(current_port);
 		return NULL;
 	}
-	sr_dbg("%c %i %s", response_cmd.code, response_cmd.len, response_cmd.buff);
+	sr_dbg("Device version = %s", cmd.buff);
 
 	// We test the version string
-	if (strcmp(response_cmd.buff, PSLELA_EXPECTED_VERSION)) {
+	if (strcmp(cmd.buff, PSLELA_EXPECTED_VERSION)) {
 		sr_info("Found device with incompatible firmware version");
 		sp_close(current_port);
 		return NULL;
 	}
-	sp_close(current_port);
 
 	// At this point, we know the device is a correct PSLELA
+	sp_close(current_port);
 	sr_info("Found device on %s", sp_get_port_description(current_port));
 	// So we add it to the list of devices
 
@@ -311,7 +345,7 @@ static int config_get(uint32_t key, GVariant **data,
 			*data = g_variant_new_uint64(devc->cur_samplerate);
 			break;
 		case SR_CONF_LIMIT_SAMPLES:
-			*data = g_variant_new_uint64(devc->cur_numsamples);
+			*data = g_variant_new_uint64(devc->cur_kisamples * 1000);
 			break;
 		default:
 			return SR_ERR_NA;
@@ -344,7 +378,7 @@ static int config_set(uint32_t key, GVariant *data,
 			devc->cur_samplerate = samplerate;
 			break;
 		case SR_CONF_LIMIT_SAMPLES:
-			devc->cur_numsamples = g_variant_get_uint64(data);
+			devc->cur_kisamples = g_variant_get_uint64(data) / 1000;
 			break;
 		default:
 			ret = SR_ERR_NA;
@@ -371,7 +405,7 @@ static int config_list(uint32_t key, GVariant **data,
 		*data = std_gvar_samplerates(ARRAY_AND_SIZE(samplerates));
 		break;
 	case SR_CONF_LIMIT_SAMPLES:
-		*data = std_gvar_tuple_u64(0, 1000 * 1000);
+		*data = std_gvar_tuple_u64(1000, 1000 * 1000);
 		break;
 	default:
 		return SR_ERR_NA;
@@ -395,10 +429,13 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	int err;
 	struct pslela_cmd cmd, response;
+	struct dev_context *devc;
 	unsigned char *buffer;
 	unsigned int i;
 	struct sr_datafeed_logic packet_contents;
 	struct sr_datafeed_packet packet;
+
+	devc = sdi->priv;
 
 	sr_dbg("Device acq start");
 
@@ -410,22 +447,44 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 #define START_PATTERN_LENGTH 32
 #define STOP_PATTERN         0xDEADC0DE
 #define STOP_PATTERN_LENGTH  32
-#define SYNCHRONOUS_MODE     0
+#define SYNCHRONOUS_MODE     1
 #define TRIGGER_SELECT_LINE  2
 	// TODO calculate freq_div parameters
-	// TODO send correct amount of KiSamples
-	u32tohex(0x00000001,            cmd.buff +  0); // DIVID_NUM
-	u32tohex(0x00000010,            cmd.buff +  8); // DIVID_DENOM
-	u32tohex(0x00000001,            cmd.buff + 16); // KISAMPLES
+	u32tohex(devc->cur_samplerate,  cmd.buff +  0); // DIVID_NUM
+	sr_dbg("Configuring device: %08x", (unsigned int) devc->cur_samplerate);
+
+	u32tohex(SR_MHZ(100),           cmd.buff +  8); // DIVID_DENOM
+	sr_dbg("Configuring device: %08x", (unsigned int) SR_MHZ(100));
+
+	u32tohex(devc->cur_kisamples,   cmd.buff + 16);
+	sr_dbg("Configuring device: %08x", (unsigned int) devc->cur_kisamples);
+
 	u32tohex(START_PATTERN,         cmd.buff + 24);
+	sr_dbg("configuring device: %08x", (unsigned int) START_PATTERN);
+
 	u32tohex(STOP_PATTERN,          cmd.buff + 32);
+	sr_dbg("configuring device: %08x", (unsigned int) STOP_PATTERN);
+
 	bytetohex(SYNCHRONOUS_MODE,     cmd.buff + 40);
+	sr_dbg("configuring device: %02x", (unsigned int) SYNCHRONOUS_MODE);
+
 	bytetohex(TRIGGER_SELECT_LINE,  cmd.buff + 42);
+	sr_dbg("configuring device: %02x", (unsigned int) TRIGGER_SELECT_LINE);
+
 	bytetohex(START_PATTERN_LENGTH, cmd.buff + 44);
+	sr_dbg("configuring device: %02x", (unsigned int) START_PATTERN_LENGTH);
+
 	bytetohex(STOP_PATTERN_LENGTH,  cmd.buff + 46);
+	sr_dbg("configuring device: %02x", (unsigned int) STOP_PATTERN_LENGTH);
 
 	if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
 		return err;
+	}
+	if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
+		return err;
+	}
+	if (response.code != PSLELA_CMD_SUCCESS) {
+		return SR_ERR_DEV_CLOSED;
 	}
 
 	// Wait for capture finish
@@ -433,7 +492,6 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	cmd.len = 0;
 
 	do {
-		g_usleep(10);
 		if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
 			return err;
 		}
@@ -454,9 +512,10 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		for (i = 0; i < packet_contents.length; i += 2) {
 			hextobyte(response.buff + (2 * i), buffer + i);
 		}
+		packet_contents.data = buffer;
 
 		packet.type = SR_DF_LOGIC;
-		packet.payload = buffer;
+		packet.payload = &packet_contents;
 
 		// Send packet
 		sr_session_send(sdi, &packet);

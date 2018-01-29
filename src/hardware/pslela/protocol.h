@@ -50,7 +50,7 @@ int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd);
 
 struct dev_context {
 	uint64_t cur_samplerate;
-	uint64_t cur_numsamples;
+	uint64_t cur_kisamples;
 };
 
 int hextobyte(const char hex[2], unsigned char *byte);

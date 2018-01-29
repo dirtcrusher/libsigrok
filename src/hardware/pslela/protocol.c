@@ -22,26 +22,61 @@
 #include <string.h>
 #include "protocol.h"
 
-int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
+
+static int send_nonblocking(struct sp_port *port, char* str, size_t len)
 {
-	char *cmd_str;
-	int retries, ret;
-	create_pslela_cmd_string(&cmd_str, cmd);
-	sr_dbg("Sending command: %s", cmd_str);
-	retries = 10;
-	while ((retries > 0) && ((ret = sp_nonblocking_write(port, cmd_str, strlen(cmd_str))) < 0)) {
-		if (ret != 0) {
-			sr_dbg("write return value: %i", ret);
+	int ret;
+	int retries = 10;
+	size_t already_written = 0;
+
+	while ((already_written < len) && (retries > 0)) {
+		ret = sp_nonblocking_write(port, str + already_written, len - already_written);
+		if (ret < 0) {
+			return ret;
+		} else {
+			already_written += ret;
 		}
 		retries--;
 		g_usleep(100000);
 	}
-	if ((ret < 0) || (retries == 0)) {
-		sr_err("Error sending command to device");
+	return already_written;
+}
+
+static int read_nonblocking(struct sp_port *port, char* buffer, size_t len)
+{
+	int ret;
+	int retries = 10;
+	size_t already_read = 0;
+
+	while ((already_read < len) && (retries > 0)) {
+		ret = sp_nonblocking_read(port, buffer + already_read, len - already_read);
+		if (ret < 0) {
+			return ret;
+		} else {
+			already_read += ret;
+		}
+		retries--;
+		g_usleep(100000);
+	}
+	return already_read;
+}
+
+int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
+{
+	char *cmd_str;
+	int ret;
+
+	create_pslela_cmd_string(&cmd_str, cmd);
+	sr_dbg("Sending command: %s", cmd_str);
+
+	ret = send_nonblocking(port, cmd_str, strlen(cmd_str));
+	if (ret < (int) strlen(cmd_str)) {
+		sr_dbg("Error sending command");
 		free(cmd_str);
 		return SR_ERR_IO;
 	}
 	free(cmd_str);
+
 	sr_dbg("Finished sending command");
 	return SR_OK;
 }
@@ -49,30 +84,29 @@ int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
 int read_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
 {
 	char response_header[4] = {0};
-	int retries, ret;
+	int ret;
+
 	sr_dbg("Reading response");
-	retries = 10;
-	while ((retries > 0) && ((ret = sp_nonblocking_read(port, response_header, 3)) >= 0)) {
-		if (ret != 0) {
-			sr_dbg("read return value: %i", ret);
-		}
-		retries--;
-		g_usleep(100000);
-	}
-	if ((ret < 0) || (retries == 0)) {
-		sr_err("Error reading data header from device");
+
+	ret = read_nonblocking(port, response_header, 3);
+	if (ret < 3) {
+		sr_dbg("Error reading command header");
 		return SR_ERR_IO;
 	}
-	parse_pslela_cmd_string(response_header, cmd);
-	retries = 10;
-	while ((retries > 0) && ((ret = sp_nonblocking_read(port, cmd->buff, cmd->len) >= 0))) {
-		retries--;
-		g_usleep(100000);
-	}
-	if ((ret < 0) || (retries == 0)) {
-		sr_err("Error reading data from device");
+
+	sr_dbg("Header %s", response_header);
+
+	if (parse_pslela_cmd_string(response_header, cmd) < 0) {
+		sr_dbg("Error parsing command header");
 		return SR_ERR_IO;
 	}
+
+	ret = read_nonblocking(port, cmd->buff, cmd->len);
+	if (ret < cmd->len) {
+		sr_dbg("Error reading command data");
+		return SR_ERR_IO;
+	}
+
 	sr_dbg("Finished reading response");
 	return SR_OK;
 }
@@ -83,7 +117,7 @@ void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
 	char tmp_byte_hex[2];
 
 	// Allocate command string
-	*str = calloc(4, sizeof(char));
+	*str = calloc(4 + cmd->len, sizeof(char));
 
 	// Append code character
 	strncat(*str, &cmd->code, 1);
@@ -91,6 +125,9 @@ void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
 	// Append len characters
 	bytetohex(cmd->len, tmp_byte_hex);
 	strncat(*str, tmp_byte_hex, 2);
+
+	// Append data
+	strncat(*str, cmd->buff, cmd->len);
 }
 
 int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd)

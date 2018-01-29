@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# https://stackoverflow.com/a/16349776
-cd "${0%/*}"
-
 doxygen Doxyfile
 RET=$?
 if [ $RET -ne 0 ]; then

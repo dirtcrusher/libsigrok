@@ -152,6 +152,7 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 		sp_close(current_port);
 		return NULL;
 	}
+	free(request_string);
 
 	// We attempt to write a "get version" command to the port
 	cmd.code = PSLELA_CMD_READ_VERSION;
@@ -335,8 +336,6 @@ static int config_get(uint32_t key, GVariant **data,
 
 	devc = sdi->priv;
 
-	(void)sdi;
-	(void)data;
 	(void)cg;
 
 	ret = SR_OK;
@@ -363,8 +362,6 @@ static int config_set(uint32_t key, GVariant *data,
 
 	devc = sdi->priv;
 
-	(void)sdi;
-	(void)data;
 	(void)cg;
 
 	ret = SR_OK;
@@ -391,10 +388,6 @@ static int config_list(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
 	int ret;
-
-	(void)sdi;
-	(void)data;
-	(void)cg;
 
 	ret = SR_OK;
 	switch (key) {
@@ -509,7 +502,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		packet_contents.unitsize = 8;
 
 		buffer = malloc(packet_contents.length * sizeof(char));
-		for (i = 0; i < packet_contents.length; i += 2) {
+		for (i = 0; i < response.len; i += 2) {
 			hextobyte(response.buff + (2 * i), buffer + i);
 		}
 		packet_contents.data = buffer;

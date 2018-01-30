@@ -511,13 +511,14 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		packet.payload = &packet_contents;
 
 		// Send packet
-		sr_session_send(sdi, &packet);
+		if (sr_session_send(sdi, &packet) < 0) {
+			sr_err("Failed to send packet");
+			free(buffer);
+			return SR_ERR;
+		}
 		free(buffer);
 
 		// Read next data
-		if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
-			return err;
-		}
 		if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
 			return err;
 		}

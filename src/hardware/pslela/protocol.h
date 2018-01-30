@@ -42,16 +42,35 @@ struct pslela_cmd {
 	char buff[256];
 };
 
-int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd);
-int read_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd);
-
 void create_pslela_cmd_string(char **str, struct pslela_cmd *cmd);
 int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd);
 
-struct dev_context {
-	uint64_t cur_samplerate;
-	uint64_t cur_kisamples;
+struct target_config {
+    unsigned divider_numerator     : 32;
+    unsigned divider_denominator   : 32;
+    unsigned nb_kisamples          : 32;
+    unsigned start_pattern         : 32;
+    unsigned stop_pattern          : 32;
+    unsigned synchronous_detection : 1;
+    unsigned trigger_line_select   : 3;
+    unsigned use_trigger           : 1;
+    unsigned start_pattern_length  : 5;
+    unsigned stop_pattern_length   : 5;
 };
+
+struct pslela_dev {
+	int version;
+	char *version_str;
+	int timeout;
+	struct target_config cfg;
+	struct pslela_cmd tx_cmd;
+	struct pslela_cmd rx_cmd;
+};
+
+int pslela_send_cmd(const struct sr_dev_inst *sdi);
+int pslela_recv_cmd(const struct sr_dev_inst *sdi);
+int pslela_probe(const struct sr_dev_inst *sdi);
+int pslela_start_capture(const struct sr_dev_inst *sdi);
 
 int hextobyte(const char hex[2], unsigned char *byte);
 int bytetohex(const unsigned char byte, char hex[2]);

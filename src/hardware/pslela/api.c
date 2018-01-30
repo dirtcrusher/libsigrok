@@ -25,6 +25,17 @@
 
 #define SERIAL_COMM_CONF "115200/8n1"
 
+static const char *channel_str[] = {
+	"D0",
+	"D1",
+	"D2",
+	"D3",
+	"D4",
+	"D5",
+	"D6",
+	"D7",
+};
+
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
 };
@@ -84,28 +95,11 @@ struct sp_port {
 	int fd;
 };
 
-
-static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di)
+static int serial_config(struct sp_port *current_port)
 {
-	struct pslela_cmd     cmd;
-	struct sp_port        *device_port;
-	struct sp_port_config *port_config;
-	struct sr_dev_inst    *device;
+	int retval;
 	struct termios         termios_p;
-	char  channel_strings[8][3];
-	char *request_string;
-	unsigned char i;
-	unsigned int  retries;
-	int ret;
-
-	sr_dbg("Probing '%s'", sp_get_port_name(current_port));
-
-	// We open the port
-	if (sp_open(current_port, SP_MODE_READ_WRITE) != SP_OK) {
-		sr_dbg("Couldn't open port");
-		return NULL;
-	}
-
+	struct sp_port_config *port_config;
 	// We configure the port
 	port_config = NULL;
 	sp_new_config(&port_config);
@@ -115,12 +109,12 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	sp_set_config_stopbits(port_config, 1);
 	sp_set_config_xon_xoff(port_config, SP_XONXOFF_OUT);
 
-	if (sp_set_config(current_port, port_config) < 0) {
-		sr_dbg("Couldn't configure port");
-		sp_free_config(port_config);
-		return NULL;
-	}
+	retval = sp_set_config(current_port, port_config);
 	sp_free_config(port_config);
+	if (retval < 0) {
+		sr_dbg("Couldn't configure port");
+		return SR_ERR;
+	}
 
 	// Since libserialport does some bad configuration, we manually remove
 	// the ECHONL flag from the termios struct
@@ -134,6 +128,30 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	termios_p.c_lflag &= ~(ECHOE | ECHOK);
 	if (tcsetattr(current_port->fd, TCSAFLUSH, &termios_p) < 0) {
 		sr_dbg("Couldn't manually configure port");
+		return SR_ERR;
+	}
+
+	return SR_OK;
+}
+
+static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_driver *di)
+{
+	struct pslela_dev     *dev;
+	struct sp_port        *device_port;
+	struct sr_dev_inst     probe_sdi;
+	struct sr_dev_inst    *device;
+	unsigned int i;
+	int ret;
+
+	sr_dbg("Probing '%s'", sp_get_port_name(current_port));
+
+	// We open the port
+	if (sp_open(current_port, SP_MODE_READ_WRITE) != SP_OK) {
+		sr_dbg("Couldn't open port");
+		return NULL;
+	}
+	ret = serial_config(current_port);
+	if (ret != SR_OK) {
 		sp_close(current_port);
 		return NULL;
 	}
@@ -142,55 +160,25 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	// We flush all buffers for good measure
 	sp_flush(current_port, SP_BUF_BOTH);
 
-	// We write a lot of 0s so that we can synchronize with the device
-	request_string = malloc(sizeof(char) * 260);
-	memset(request_string, '0', sizeof(char) * 259);
-	request_string[259] = 0;
-	if (sp_nonblocking_write(current_port, request_string, 259) < 0) {
-		sr_dbg("Couldn't write to port");
-		free(request_string);
-		sp_close(current_port);
-		return NULL;
-	}
-	free(request_string);
-
-	// We attempt to write a "get version" command to the port
-	cmd.code = PSLELA_CMD_READ_VERSION;
-	cmd.len = 0;
-	if (send_pslela_cmd(current_port, &cmd) < 0) {
-		sr_dbg("Couldn't write command to port");
+	dev = calloc(1, sizeof(struct pslela_dev));
+	if (!dev) {
+		sr_err("Malloc failed");
 		sp_close(current_port);
 		return NULL;
 	}
 
-	sr_dbg("Emptying write buffer to port");
-	retries = 10;
-	while ((retries > 0) && ((ret = sp_output_waiting(current_port)) > 0)) {
-	    if (ret < 0) {
-		    sr_dbg("Error while emptying write buffer to port");
-		    sp_close(current_port);
-		    return NULL;
-	    }
-	    retries--;
-	    g_usleep(100000);
-	}
-	if ((retries == 0) || (ret < 0)) {
-	    sr_dbg("Couldn't empty write buffer to port");
-	    sp_close(current_port);
-	    return NULL;
-	}
+	probe_sdi.priv = dev;
+        probe_sdi.conn = current_port;
 
-	// We attempt to read the response
-	sr_dbg("Reading version from port");
-	if (read_pslela_cmd(current_port, &cmd) < 0) {
-		sr_dbg("Couldn't read version from port");
+	ret = pslela_probe(&probe_sdi);
+	if (ret != SR_OK) {
+		sr_err("Probe failed");
 		sp_close(current_port);
 		return NULL;
 	}
-	sr_dbg("Device version = %s", cmd.buff);
 
 	// We test the version string
-	if (strcmp(cmd.buff, PSLELA_EXPECTED_VERSION)) {
+	if (strcmp(dev->version_str, PSLELA_EXPECTED_VERSION)) {
 		sr_info("Found device with incompatible firmware version");
 		sp_close(current_port);
 		return NULL;
@@ -203,24 +191,25 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 
 	// Create new device instance
 	device = sr_dev_inst_user_new(
-		"PSLELAvendor",
-		"PSLELAmodel",
+		"ENSIMAG 2017 SLE",
+		"PSLELA Zybo",
 		PSLELA_EXPECTED_VERSION
 	);
 	sp_copy_port(current_port, &device_port);
 	device->conn = device_port;
-	device->connection_id = malloc(sizeof(char) * strlen(sp_get_port_name(current_port)));
+	device->connection_id = malloc(sizeof(char) * (strlen(sp_get_port_name(current_port) + 1)));
 	strcpy(device->connection_id, sp_get_port_name(current_port));
+	device->priv = dev;
 	device->driver = di;
-	device->priv = calloc(1, sizeof(struct dev_context));
-	((struct dev_context *) (device->priv))->cur_samplerate = SR_KHZ(1);
-	((struct dev_context *) (device->priv))->cur_kisamples = 1;
+
+	dev->cfg.divider_numerator = SR_KHZ(1);
+	dev->cfg.divider_denominator = SR_MHZ(100);
+	dev->cfg.nb_kisamples = 1;
 
 	// Add the 8 logic channels to it
 	sr_dbg("Adding logic channels");
 	for (i = 0; i < 8; i++) {
-		sprintf(channel_strings[i], "D%i", i);
-		sr_dev_inst_channel_add(device, i, SR_CHANNEL_LOGIC, channel_strings[i]);
+		sr_dev_inst_channel_add(device, i, SR_CHANNEL_LOGIC, channel_str[i]);
 	}
 
 	return device;
@@ -328,20 +317,19 @@ static int dev_close(struct sr_dev_inst *sdi)
 static int config_get(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
-	struct dev_context *devc;
+	struct pslela_dev *dev = sdi->priv;
+	struct target_config *cfg = &dev->cfg;
 	int ret;
-
-	devc = sdi->priv;
 
 	(void)cg;
 
 	ret = SR_OK;
 	switch (key) {
 		case SR_CONF_SAMPLERATE:
-			*data = g_variant_new_uint64(devc->cur_samplerate);
+			*data = g_variant_new_uint64(cfg->divider_numerator);
 			break;
 		case SR_CONF_LIMIT_SAMPLES:
-			*data = g_variant_new_uint64(devc->cur_kisamples * 1000);
+			*data = g_variant_new_uint64(cfg->nb_kisamples * 1000);
 			break;
 		default:
 			return SR_ERR_NA;
@@ -353,13 +341,25 @@ static int config_get(uint32_t key, GVariant **data,
 static int config_set(uint32_t key, GVariant *data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
-	struct dev_context *devc;
+	struct pslela_dev *dev = sdi->priv;
+	struct target_config *cfg = &dev->cfg;
 	int ret;
 	uint64_t samplerate;
 
-	devc = sdi->priv;
-
 	(void)cg;
+#define START_PATTERN        0x00000001
+#define START_PATTERN_LENGTH 1
+#define STOP_PATTERN         0x0000000F
+#define STOP_PATTERN_LENGTH  4
+#define SYNCHRONOUS_MODE     0
+#define TRIGGER_SELECT_LINE  1
+	cfg->divider_denominator   = SR_MHZ(100);
+	cfg->start_pattern         = START_PATTERN;
+	cfg->stop_pattern          = STOP_PATTERN;
+	cfg->synchronous_detection = SYNCHRONOUS_MODE;
+	cfg->trigger_line_select   = TRIGGER_SELECT_LINE;
+	cfg->start_pattern_length  = START_PATTERN_LENGTH;
+	cfg->stop_pattern_length   = STOP_PATTERN_LENGTH;
 
 	ret = SR_OK;
 	switch (key) {
@@ -369,10 +369,10 @@ static int config_set(uint32_t key, GVariant *data,
 			    || (samplerate > samplerates[NUM_SAMPLERATES - 1])) {
 				return SR_ERR_ARG;
 			}
-			devc->cur_samplerate = samplerate;
+			cfg->divider_numerator = samplerate;
 			break;
 		case SR_CONF_LIMIT_SAMPLES:
-			devc->cur_kisamples = g_variant_get_uint64(data) / 1000;
+			cfg->nb_kisamples = g_variant_get_uint64(data) / 1000;
 			break;
 		default:
 			ret = SR_ERR_NA;
@@ -417,109 +417,60 @@ static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
-	int err;
-	struct pslela_cmd cmd, response;
-	struct dev_context *devc;
-	unsigned char *buffer;
+	struct pslela_dev *dev = sdi->priv;
+	unsigned char buffer[128];
 	unsigned int i;
 	struct sr_datafeed_logic packet_contents;
 	struct sr_datafeed_packet packet;
-
-	devc = sdi->priv;
+	int err;
 
 	sr_dbg("Device acq start");
 
-	// Send start command
-	cmd.code = PSLELA_CMD_START_CAPTURE;
-	cmd.len = 48;
-
-#define START_PATTERN        0x00000001
-#define START_PATTERN_LENGTH 1
-#define STOP_PATTERN         0x0000000F
-#define STOP_PATTERN_LENGTH  4
-#define SYNCHRONOUS_MODE     0
-#define TRIGGER_SELECT_LINE  1
-	u32tohex(devc->cur_samplerate,  cmd.buff +  0); // DIVID_NUM
-	sr_dbg("Configuring device: %08x", (unsigned int) devc->cur_samplerate);
-
-	u32tohex(SR_MHZ(100),           cmd.buff +  8); // DIVID_DENOM
-	sr_dbg("Configuring device: %08x", (unsigned int) SR_MHZ(100));
-
-	u32tohex(devc->cur_kisamples,   cmd.buff + 16);
-	sr_dbg("Configuring device: %08x", (unsigned int) devc->cur_kisamples);
-
-	u32tohex(START_PATTERN,         cmd.buff + 24);
-	sr_dbg("configuring device: %08x", (unsigned int) START_PATTERN);
-
-	u32tohex(STOP_PATTERN,          cmd.buff + 32);
-	sr_dbg("configuring device: %08x", (unsigned int) STOP_PATTERN);
-
-	bytetohex(SYNCHRONOUS_MODE,     cmd.buff + 40);
-	sr_dbg("configuring device: %02x", (unsigned int) SYNCHRONOUS_MODE);
-
-	bytetohex(TRIGGER_SELECT_LINE,  cmd.buff + 42);
-	sr_dbg("configuring device: %02x", (unsigned int) TRIGGER_SELECT_LINE);
-
-	bytetohex(START_PATTERN_LENGTH, cmd.buff + 44);
-	sr_dbg("configuring device: %02x", (unsigned int) START_PATTERN_LENGTH);
-
-	bytetohex(STOP_PATTERN_LENGTH,  cmd.buff + 46);
-	sr_dbg("configuring device: %02x", (unsigned int) STOP_PATTERN_LENGTH);
-
-	if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
+	err = pslela_start_capture(sdi);
+	if (err < 0) {
 		return err;
 	}
-	if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
-		return err;
-	}
-	if (response.code != PSLELA_CMD_SUCCESS) {
-		return SR_ERR_DEV_CLOSED;
-	}
 
-	// Wait for capture finish
-	cmd.code = PSLELA_CMD_READ_CAPTURE;
-	cmd.len = 0;
+	// Wait for capture to finish
+	dev->tx_cmd.code = PSLELA_CMD_READ_CAPTURE;
+	dev->tx_cmd.len = 0;
 
 	do {
-		if ((err = send_pslela_cmd(sdi->conn, &cmd)) != SR_OK) {
+		if ((err = pslela_send_cmd(sdi)) != SR_OK) {
 			return err;
 		}
-		if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
+		err = pslela_recv_cmd(sdi);
+		if (err != SR_OK && err != SR_ERR_DATA) {
 			return err;
 		}
-	} while (response.code == PSLELA_CMD_ERROR);
+	} while (dev->rx_cmd.code == PSLELA_CMD_ERROR);
 
 	// Read capture response
 	do {
-		sr_dbg("Received %i data characters", response.len);
+		sr_dbg("Received %i data characters", dev->rx_cmd.len);
 
 		// Prepare packet
-		packet_contents.length = response.len / 2;
+		packet_contents.length = dev->rx_cmd.len / 2;
 		packet_contents.unitsize = 1;
 
-		buffer = malloc(packet_contents.length * sizeof(char));
-
 		for (i = 0; i < packet_contents.length; i++) {
-			hextobyte(response.buff + (2 * i), buffer + i);
+			hextobyte(&dev->rx_cmd.buff[2 * i], &buffer[i]);
 		}
 		packet_contents.data = buffer;
-
 		packet.type = SR_DF_LOGIC;
 		packet.payload = &packet_contents;
 
 		// Send packet
 		if (sr_session_send(sdi, &packet) < 0) {
 			sr_err("Failed to send packet");
-			free(buffer);
 			return SR_ERR;
 		}
-		free(buffer);
 
 		// Read next data
-		if ((err = read_pslela_cmd(sdi->conn, &response)) != SR_OK) {
+		if ((err = pslela_recv_cmd(sdi)) != SR_OK) {
 			return err;
 		}
-	} while (response.len != 0);
+	} while (dev->rx_cmd.len != 0);
 
 	// Stop capture
 	dev_acquisition_stop((struct sr_dev_inst*)sdi);

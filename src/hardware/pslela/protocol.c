@@ -29,17 +29,27 @@ static int send_nonblocking(struct sp_port *port, char* str, size_t len)
 	int retries = 10;
 	size_t already_written = 0;
 
-	while ((already_written < len) && (retries > 0)) {
-		ret = sp_nonblocking_write(port, str + already_written, len - already_written);
+	while (len && (retries > 0)) {
+		ret = sp_nonblocking_write(port, str + already_written, len);
 		if (ret < 0) {
+			sr_dbg("sp_nonblock_write failed: %d", ret);
 			return ret;
+		} else if (ret == 0) {
+			retries--;
+			g_usleep(10000);
 		} else {
 			already_written += ret;
+			len -= ret;
 		}
-		retries--;
-		g_usleep(10000);
 	}
-	return already_written;
+
+	if (retries == 0) {
+		ret = SR_ERR_TIMEOUT;
+	} else {
+		ret = SR_OK;
+	}
+
+	return ret;
 }
 
 static int read_nonblocking(struct sp_port *port, char* buffer, size_t len)
@@ -48,69 +58,197 @@ static int read_nonblocking(struct sp_port *port, char* buffer, size_t len)
 	int retries = 10;
 	size_t already_read = 0;
 
-	while ((already_read < len) && (retries > 0)) {
-		ret = sp_nonblocking_read(port, buffer + already_read, len - already_read);
+	while (len && (retries > 0)) {
+		ret = sp_nonblocking_read(port, buffer + already_read, len);
 		if (ret < 0) {
 			return ret;
+		} else if (ret == 0) {
+			retries--;
+			g_usleep(10000);
 		} else {
 			already_read += ret;
+			len -= ret;
 		}
-		retries--;
-		g_usleep(10000);
 	}
-	return already_read;
+
+	if (retries == 0) {
+		ret = SR_ERR_TIMEOUT;
+	} else {
+		ret = SR_OK;
+	}
+
+	return ret;
 }
 
-int send_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
+int pslela_send_cmd(const struct sr_dev_inst *sdi)
 {
-	char *cmd_str;
+	struct pslela_dev *dev = sdi->priv;
+	struct pslela_cmd *cmd = &dev->tx_cmd;
+	int retval;
+	char len[2];
+
+	cmd->buff[cmd->len] = 0;
+	sr_dbg("Sending  command: [%c%.2x|%s]", cmd->code, cmd->len,
+		cmd->buff);
+
+	retval = send_nonblocking(sdi->conn, &cmd->code, 1);
+	if (retval) {
+		return retval;
+	}
+
+	bytetohex(cmd->len, len);
+
+	retval = send_nonblocking(sdi->conn, len, 2);
+	if (retval) {
+		return retval;
+	}
+
+	if (cmd->len) {
+		retval = send_nonblocking(sdi->conn, cmd->buff, cmd->len);
+	}
+
+	return retval;
+}
+
+int pslela_recv_cmd(const struct sr_dev_inst *sdi)
+{
+	struct pslela_dev *dev = sdi->priv;
+	struct pslela_cmd *cmd = &dev->rx_cmd;
+	int retval;
+	char len[2];
+
+	retval = read_nonblocking(sdi->conn, &cmd->code, 1);
+	if (retval) {
+		return retval;
+	} else if (cmd->code != PSLELA_CMD_SUCCESS
+		   && cmd->code != PSLELA_CMD_ERROR) {
+		sr_err("Received unknown response code 0x%.2x", cmd->code);
+		return SR_ERR_IO;
+	}
+
+	retval = read_nonblocking(sdi->conn, len, 2);
+	if (retval) {
+		return retval;
+	} else if (hextobyte(len, &cmd->len)) {
+		sr_dbg("Convertion error");
+		return SR_ERR_IO;
+	}
+
+	if (cmd->len) {
+		retval = read_nonblocking(sdi->conn, cmd->buff, cmd->len);
+	}
+
+	cmd->buff[cmd->len] = 0;
+	sr_dbg("Received command: [%c%.2x|%s]", cmd->code, cmd->len,
+		cmd->buff);
+
+	if (!retval && cmd->code == PSLELA_CMD_ERROR) {
+		sr_err("Analyzer Error: '%s'\n", cmd->buff);
+		return SR_ERR_DATA;
+	}
+
+	return retval;
+}
+
+static void init_cmd_start_capture(struct pslela_cmd *cmd, const struct target_config *cfg) {
+	cmd->code = PSLELA_CMD_START_CAPTURE;
+	cmd->len = 48;
+	u32tohex(cfg->divider_numerator,      cmd->buff);
+	u32tohex(cfg->divider_denominator,    cmd->buff +  8);
+	u32tohex(cfg->nb_kisamples,           cmd->buff + 16);
+	u32tohex(cfg->start_pattern,          cmd->buff + 24);
+	u32tohex(cfg->stop_pattern,           cmd->buff + 32);
+	bytetohex(cfg->synchronous_detection, cmd->buff + 40);
+	bytetohex(cfg->trigger_line_select,   cmd->buff + 42);
+	bytetohex(cfg->start_pattern_length,  cmd->buff + 44);
+	bytetohex(cfg->stop_pattern_length,   cmd->buff + 46);
+}
+
+int pslela_start_capture(const struct sr_dev_inst *sdi)
+{
+	struct pslela_dev *dev = sdi->priv;
+	int retval;
+
+	init_cmd_start_capture(&dev->tx_cmd, &dev->cfg);
+	retval = pslela_send_cmd(sdi);
+	if (retval) {
+		sr_err("Failed to send 'start capture'");
+		return retval;
+	}
+
+	retval = pslela_recv_cmd(sdi);
+	if (retval && retval != SR_ERR_DEV_CLOSED) {
+		sr_err("Action 'start capture' failed");
+	}
+
+	return retval;
+}
+
+static int read_version(const struct sr_dev_inst *sdi)
+{
+	struct pslela_dev *dev = sdi->priv;
+	int retval;
+
+	dev->tx_cmd.code = PSLELA_CMD_READ_VERSION;
+	dev->tx_cmd.len  = 0;
+
+	retval = pslela_send_cmd(sdi);
+	if (retval) {
+		sr_dbg("readver: Fail to send");
+		return retval;
+	}
+
+	retval = pslela_recv_cmd(sdi);
+	if (retval && retval != SR_ERR_DATA) {
+		sr_err("Action 'read version' failed");
+	}
+
+	if (!retval) {
+		dev->version_str = g_strndup(dev->rx_cmd.buff, dev->rx_cmd.len);
+		if (!dev->version_str) {
+			/* TODO see errno for error code */
+		}
+	} else {
+		sr_dbg("readver: Fail to recv");
+	}
+
+	return retval;
+}
+
+static int pslela_init(const struct sr_dev_inst *sdi)
+{
+	struct pslela_dev *dev = sdi->priv;
+	memset(dev->tx_cmd.buff, '0', 256);
+	return send_nonblocking(sdi->conn, dev->tx_cmd.buff, 256);
+}
+
+
+int pslela_probe(const struct sr_dev_inst *sdi)
+{
+	struct sp_port *dev_port = sdi->conn;
+	unsigned int retries;
 	int ret;
 
-	create_pslela_cmd_string(&cmd_str, cmd);
-	sr_dbg("Sending command: %s", cmd_str);
-
-	ret = send_nonblocking(port, cmd_str, strlen(cmd_str));
-	if (ret < (int) strlen(cmd_str)) {
-		sr_dbg("Error sending command");
-		free(cmd_str);
-		return SR_ERR_IO;
+	ret = pslela_init(sdi);
+	sr_dbg("Emptying write buffer to port");
+	retries = 10;
+	while ((retries > 0) && ((ret = sp_output_waiting(dev_port)) > 0)) {
+	    if (ret < 0) {
+		    sr_dbg("Error while emptying write buffer to port");
+		    return SR_ERR_IO;
+	    }
+	    retries--;
+	    g_usleep(100000);
 	}
-	free(cmd_str);
+	if ((retries == 0) || (ret < 0)) {
+	    sr_dbg("Couldn't empty write buffer to port");
+	    return SR_ERR_IO;
+	}
 
-	sr_dbg("Finished sending command");
-	return SR_OK;
+	ret = read_version(sdi);
+
+	return ret;
 }
-
-int read_pslela_cmd(struct sp_port *port, struct pslela_cmd *cmd)
-{
-	char response_header[4] = {0};
-	int ret;
-
-	sr_dbg("Reading response");
-
-	ret = read_nonblocking(port, response_header, 3);
-	if (ret < 3) {
-		sr_dbg("Error reading command header");
-		return SR_ERR_IO;
-	}
-
-	sr_dbg("Header %s", response_header);
-
-	if (parse_pslela_cmd_string(response_header, cmd) < 0) {
-		sr_dbg("Error parsing command header");
-		return SR_ERR_IO;
-	}
-
-	ret = read_nonblocking(port, cmd->buff, cmd->len);
-	if (ret < cmd->len) {
-		sr_dbg("Error reading command data");
-		return SR_ERR_IO;
-	}
-
-	sr_dbg("Finished reading response");
-	return SR_OK;
-}
-
 
 void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
 {

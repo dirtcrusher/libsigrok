@@ -296,8 +296,6 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 
 static int dev_open(struct sr_dev_inst *sdi)
 {
-	(void)sdi;
-
 	sr_dbg("Device open");
 
 	if (!sdi || !sdi->conn) {
@@ -313,8 +311,6 @@ static int dev_open(struct sr_dev_inst *sdi)
 
 static int dev_close(struct sr_dev_inst *sdi)
 {
-	(void)sdi;
-
 	sr_dbg("Device close");
 
 	if (!sdi || !sdi->conn) {

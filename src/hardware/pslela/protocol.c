@@ -250,53 +250,6 @@ int pslela_probe(const struct sr_dev_inst *sdi)
 	return ret;
 }
 
-void create_pslela_cmd_string(char **str, struct pslela_cmd* cmd)
-{
-	char tmp_byte_hex[2];
-
-	// Allocate command string
-	*str = calloc(4 + cmd->len, sizeof(char));
-
-	// Append code character
-	strncat(*str, &cmd->code, 1);
-
-	// Append len characters
-	bytetohex(cmd->len, tmp_byte_hex);
-	strncat(*str, tmp_byte_hex, 2);
-
-	// Append data
-	strncat(*str, cmd->buff, cmd->len);
-}
-
-int parse_pslela_cmd_string(char *str, struct pslela_cmd *cmd)
-{
-	unsigned char tmp_byte;
-	int total_len;
-
-	// Verify that the string is at least the minimum size
-	total_len = strlen(str);
-	if (total_len < 3) {
-		return -1;
-	}
-
-	// Parse command code
-	cmd->code = str[0];
-
-	// Parse command length
-	hextobyte(str + 1, &tmp_byte);
-	cmd->len = tmp_byte;
-
-	// Verify that the string contains all the data
-	if (total_len < (3 + cmd->len)) {
-		return 1;
-	}
-
-	// Copy data
-	strncpy(cmd->buff, str + 3, cmd->len);
-	return 0;
-}
-
-
 int hextobyte(const char hex[2], unsigned char *byte)
 {
 	unsigned char upper, lower;

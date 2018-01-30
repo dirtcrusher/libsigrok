@@ -432,13 +432,12 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	cmd.code = PSLELA_CMD_START_CAPTURE;
 	cmd.len = 48;
 
-#define START_PATTERN        0xDEADBEEF
-#define START_PATTERN_LENGTH 32
-#define STOP_PATTERN         0xDEADC0DE
-#define STOP_PATTERN_LENGTH  32
-#define SYNCHRONOUS_MODE     1
-#define TRIGGER_SELECT_LINE  2
-	// TODO calculate freq_div parameters
+#define START_PATTERN        0x00000001
+#define START_PATTERN_LENGTH 1
+#define STOP_PATTERN         0x0000000F
+#define STOP_PATTERN_LENGTH  4
+#define SYNCHRONOUS_MODE     0
+#define TRIGGER_SELECT_LINE  1
 	u32tohex(devc->cur_samplerate,  cmd.buff +  0); // DIVID_NUM
 	sr_dbg("Configuring device: %08x", (unsigned int) devc->cur_samplerate);
 
@@ -495,10 +494,11 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 
 		// Prepare packet
 		packet_contents.length = response.len / 2;
-		packet_contents.unitsize = 8;
+		packet_contents.unitsize = 1;
 
 		buffer = malloc(packet_contents.length * sizeof(char));
-		for (i = 0; i < response.len; i += 2) {
+
+		for (i = 0; i < packet_contents.length; i++) {
 			hextobyte(response.buff + (2 * i), buffer + i);
 		}
 		packet_contents.data = buffer;

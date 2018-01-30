@@ -37,7 +37,7 @@ static int send_nonblocking(struct sp_port *port, char* str, size_t len)
 			already_written += ret;
 		}
 		retries--;
-		g_usleep(100000);
+		g_usleep(10000);
 	}
 	return already_written;
 }
@@ -56,7 +56,7 @@ static int read_nonblocking(struct sp_port *port, char* buffer, size_t len)
 			already_read += ret;
 		}
 		retries--;
-		g_usleep(100000);
+		g_usleep(10000);
 	}
 	return already_read;
 }

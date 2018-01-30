@@ -213,7 +213,8 @@ static struct sr_dev_inst *probe(struct sp_port *current_port, struct sr_dev_dri
 	strcpy(device->connection_id, sp_get_port_name(current_port));
 	device->driver = di;
 	device->priv = calloc(1, sizeof(struct dev_context));
-	((struct dev_context *) (device->priv))->cur_samplerate = samplerates[0];
+	((struct dev_context *) (device->priv))->cur_samplerate = SR_KHZ(1);
+	((struct dev_context *) (device->priv))->cur_kisamples = 1;
 
 	// Add the 8 logic channels to it
 	sr_dbg("Adding logic channels");
